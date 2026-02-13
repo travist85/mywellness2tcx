@@ -1,0 +1,97 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* Light-first theme with blue accent */
+  color-scheme: light dark;
+  color: #0f172a; /* dark text for light theme */
+  background-color: transparent;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: #3b82f6; /* blue accent */
+  text-decoration: inherit;
+}
+a:hover {
+  color: #1e40af;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid #cbd5e1 !important;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #dbeafe !important;
+  color: #0f172a !important;
+  cursor: pointer;
+  transition: all 0.25s;
+}
+button:hover {
+  border-color: #3b82f6 !important;
+  background-color: #bfdbfe !important;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  background: inherit;
+}
+
+th {
+  background: #e8eef7 !important;
+  color: #0f172a !important;
+  padding: 12px 8px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 14px;
+  border-bottom: 2px solid #cbd5e1 !important;
+}
+
+td {
+  padding: 8px 8px;
+  color: #0f172a !important;
+  border-bottom: 2px solid #e2e8f0 !important;
+  background: inherit !important;
+}
+
+/* Metrics rows (odd-numbered rows in tbody) have no border below */
+tbody tr:nth-child(odd) td {
+  border-bottom: none !important;
+}
+
+tr:last-child td {
+  border-bottom: 2px solid #cbd5e1 !important;
+}
+
+/* Last row still needs bottom border */
+tbody tr:last-child td {
+  border-bottom: none !important;
+}
