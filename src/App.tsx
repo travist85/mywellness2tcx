@@ -1,5 +1,7 @@
-import { useMemo, useRef, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import JSZip from "jszip";
+import { FitWriter } from "@markw65/fit-file-writer";
 
 type WorkoutExportOpts = {
   includeHrSeries: boolean;
@@ -12,6 +14,7 @@ type WorkoutExportOpts = {
 };
 
 type Workout = {
+  uid: string;
   source: "indoor" | "outdoor";
   id: string;
   startedAtISO?: string;
@@ -32,13 +35,61 @@ type Workout = {
   // schema-inspector
   metrics: Record<string, number>;
   metricKeys: string[];
+  series?: SeriesPoint[];
 
-  raw: any;
+  raw: unknown;
 };
 
-function safeNumber(v: any): number | undefined {
+type SeriesPoint = {
+  tSec: number;
+  hr?: number;
+  watts?: number;
+  cadence?: number;
+  verticalM?: number;
+};
+
+type ImportMode = "zip" | "json";
+type ExportFormat = "tcx" | "fit";
+
+function safeNumber(v: unknown): number | undefined {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   return Number.isFinite(n) ? n : undefined;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    return v as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function asNumberArray(v: unknown): number[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => safeNumber(x)).filter((x): x is number => x != null);
+}
+
+function average(values: number[]): number | undefined {
+  if (!values.length) return undefined;
+  return values.reduce((acc, x) => acc + x, 0) / values.length;
+}
+
+function parseDurationString(s: string): number | undefined {
+  const trimmed = s.trim();
+  const parts = trimmed.split(":");
+  if (parts.length === 2) {
+    const m = Number(parts[0]);
+    const sec = Number(parts[1]);
+    if (Number.isFinite(m) && Number.isFinite(sec)) return m * 60 + sec;
+  }
+  if (parts.length === 3) {
+    const h = Number(parts[0]);
+    const m = Number(parts[1]);
+    const sec = Number(parts[2]);
+    if (Number.isFinite(h) && Number.isFinite(m) && Number.isFinite(sec)) {
+      return h * 3600 + m * 60 + sec;
+    }
+  }
+  return undefined;
 }
 
 function formatDuration(sec?: number): string {
@@ -85,20 +136,25 @@ function downloadTextFile(
   downloadBlob(filename, new Blob([contents], { type: mime }));
 }
 
-function prToMap(raw: any): Record<string, number> {
+function prToMap(raw: unknown): Record<string, number> {
   const out: Record<string, number> = {};
 
+  const rawRec = asRecord(raw);
+  const performedData = asRecord(rawRec?.performedData);
+  const physicalActivityData = asRecord(rawRec?.physicalActivityData);
+
   const pr =
-    raw?.performedData?.pr ??
-    raw?.physicalActivityData?.pr ??
-    raw?.performedData?.PR ??
-    raw?.physicalActivityData?.PR;
+    performedData?.pr ??
+    physicalActivityData?.pr ??
+    performedData?.PR ??
+    physicalActivityData?.PR;
 
   if (!Array.isArray(pr)) return out;
 
   for (const item of pr) {
-    const name = item?.n;
-    const val = safeNumber(item?.v);
+    const itemRec = asRecord(item);
+    const name = itemRec?.n;
+    const val = safeNumber(itemRec?.v);
     if (typeof name === "string" && val != null) out[name] = val;
   }
   return out;
@@ -121,14 +177,43 @@ function pickCadenceSpm(metrics: Record<string, number>): number | undefined {
   return metrics["AvgSpm"] ?? metrics["Cadence"];
 }
 
+function safeDateToken(iso?: string): string {
+  const parsed = iso ? new Date(iso) : new Date();
+  const dt = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  return dt.toISOString().replace(/[:]/g, "").replace(/\..+/, "Z");
+}
+
+function pickFitSport(
+  w: Workout,
+): {
+  sport: "running" | "cycling" | "fitness_equipment" | "generic";
+  subSport?: "stair_climbing";
+} {
+  const a = (w.activityName || "").toLowerCase();
+  if (a.includes("run")) return { sport: "running" };
+  if (a.includes("cycle") || a.includes("bike") || a.includes("ride")) return { sport: "cycling" };
+  if (a.includes("stair") || a.includes("climb") || a.includes("floor")) {
+    return { sport: "fitness_equipment", subSport: "stair_climbing" };
+  }
+  if (w.source === "indoor") return { sport: "fitness_equipment" };
+  return { sport: "generic" };
+}
+
 function workoutToTCX(w: Workout, opts: WorkoutExportOpts): string {
+  const rawRec = asRecord(w.raw);
+  const rawStartISO =
+    typeof rawRec?.on === "string"
+      ? rawRec.on
+      : typeof rawRec?.performedDate === "string"
+        ? rawRec.performedDate
+        : undefined;
   const startISO =
     (typeof w.startedAtISO === "string" && w.startedAtISO) ||
-    w.raw?.on ||
-    w.raw?.performedDate ||
+    rawStartISO ||
     new Date().toISOString();
 
   const start = new Date(startISO);
+  const validStartMs = Number.isNaN(start.getTime()) ? Date.now() : start.getTime();
   const startForTCX = Number.isNaN(start.getTime())
     ? new Date().toISOString()
     : start.toISOString();
@@ -163,33 +248,91 @@ function workoutToTCX(w: Workout, opts: WorkoutExportOpts): string {
 
   const cadence = cadenceSpm != null ? Math.round(cadenceSpm) : undefined;
 
-  // Trackpoints every 5 seconds (Strava-friendly)
-  const step = 5;
-  const n =
-    totalSeconds > 0 ? Math.max(2, Math.floor(totalSeconds / step) + 1) : 2;
-
   const points: string[] = [];
-  for (let i = 0; i < n; i++) {
-    const t = Math.min(totalSeconds, i * step);
-    const time = new Date(start.getTime() + t * 1000).toISOString();
+  const hasSeries = Array.isArray(w.series) && w.series.length > 0;
+  if (hasSeries) {
+    const sortedSeries = [...(w.series ?? [])].sort((a, b) => a.tSec - b.tSec);
+    const seriesTotalSec = Math.max(
+      totalSeconds,
+      sortedSeries[sortedSeries.length - 1]?.tSec ?? 0,
+    );
+    for (const p of sortedSeries) {
+      const t = Math.max(0, Math.round(p.tSec));
+      const time = new Date(validStartMs + t * 1000).toISOString();
+      const hr =
+        opts.includeHrSeries
+          ? p.hr != null
+            ? Math.round(p.hr)
+            : undefined
+          : undefined;
+      const pointCadence =
+        opts.includeCadenceSeries
+          ? p.cadence != null
+            ? Math.round(p.cadence)
+            : cadence
+          : undefined;
+      const pointWatts =
+        opts.includePowerSeries
+          ? p.watts != null
+            ? Math.round(p.watts)
+            : watts
+          : undefined;
+      const dist =
+        totalDistanceM != null && seriesTotalSec > 0
+          ? totalDistanceM * (t / seriesTotalSec)
+          : 0;
+      const alt =
+        opts.includeVerticalAsAltitude
+          ? p.verticalM != null
+            ? p.verticalM
+            : totalVerticalM != null && seriesTotalSec > 0
+              ? totalVerticalM * (t / seriesTotalSec)
+              : undefined
+          : undefined;
 
-    // HR: export as constant AvgHr (explicitly approximate)
-    const hr =
-      opts.includeHrSeries && avgHr != null && maxHr != null
-        ? Math.round(avgHr)
-        : undefined;
+      points.push(`
+        <Trackpoint>
+          <Time>${time}</Time>
+          ${alt != null ? `<AltitudeMeters>${alt.toFixed(1)}</AltitudeMeters>` : ""}
+          <DistanceMeters>${dist.toFixed(1)}</DistanceMeters>
+          ${hr != null ? `<HeartRateBpm><Value>${hr}</Value></HeartRateBpm>` : ""}
+          ${pointCadence != null ? `<Cadence>${pointCadence}</Cadence>` : ""}
+          ${pointWatts != null
+          ? `<Extensions>
+                  <tpx:TPX>
+                    <tpx:Watts>${pointWatts}</tpx:Watts>
+                  </tpx:TPX>
+                </Extensions>`
+          : ""
+        }
+        </Trackpoint>`);
+    }
+  } else {
+    // Fallback synthetic trackpoints every 5 seconds (Strava-friendly)
+    const step = 5;
+    const n =
+      totalSeconds > 0 ? Math.max(2, Math.floor(totalSeconds / step) + 1) : 2;
+    for (let i = 0; i < n; i++) {
+      const t = Math.min(totalSeconds, i * step);
+      const time = new Date(validStartMs + t * 1000).toISOString();
 
-    const dist =
-      totalDistanceM != null && totalSeconds > 0
-        ? totalDistanceM * (t / totalSeconds)
-        : 0;
+      // HR: export as constant AvgHr (explicitly approximate)
+      const hr =
+        opts.includeHrSeries && (avgHr != null || maxHr != null)
+          ? Math.round(avgHr ?? maxHr)
+          : undefined;
 
-    const alt =
-      totalVerticalM != null && totalSeconds > 0
-        ? totalVerticalM * (t / totalSeconds)
-        : undefined;
+      const dist =
+        totalDistanceM != null && totalSeconds > 0
+          ? totalDistanceM * (t / totalSeconds)
+          : 0;
 
-    points.push(`
+      const alt =
+        totalVerticalM != null && totalSeconds > 0
+          ? totalVerticalM * (t / totalSeconds)
+          : undefined;
+
+      points.push(`
         <Trackpoint>
           <Time>${time}</Time>
           ${alt != null ? `<AltitudeMeters>${alt.toFixed(1)}</AltitudeMeters>` : ""}
@@ -197,14 +340,15 @@ function workoutToTCX(w: Workout, opts: WorkoutExportOpts): string {
           ${hr != null ? `<HeartRateBpm><Value>${hr}</Value></HeartRateBpm>` : ""}
           ${cadence != null ? `<Cadence>${cadence}</Cadence>` : ""}
           ${watts != null
-        ? `<Extensions>
+          ? `<Extensions>
                   <tpx:TPX>
                     <tpx:Watts>${watts}</tpx:Watts>
                   </tpx:TPX>
                 </Extensions>`
-        : ""
-      }
+          : ""
+        }
         </Trackpoint>`);
+    }
   }
 
   const sport = pickSport(w.activityName);
@@ -239,12 +383,290 @@ function workoutToTCX(w: Workout, opts: WorkoutExportOpts): string {
 </TrainingCenterDatabase>`;
 }
 
-function extractWorkoutsFromIndoorJSON(obj: any): Workout[] {
+function workoutToFIT(
+  w: Workout,
+  opts: WorkoutExportOpts,
+  enhancedCompatibility = false,
+): ArrayBuffer {
+  const rawRec = asRecord(w.raw);
+  const rawStartISO =
+    typeof rawRec?.on === "string"
+      ? rawRec.on
+      : typeof rawRec?.performedDate === "string"
+        ? rawRec.performedDate
+        : undefined;
+  const startISO =
+    (typeof w.startedAtISO === "string" && w.startedAtISO) ||
+    rawStartISO ||
+    new Date().toISOString();
+  const start = new Date(startISO);
+  const startMs = Number.isNaN(start.getTime()) ? Date.now() : start.getTime();
+
+  const totalSeconds = Math.max(0, Math.round(w.durationSec ?? 0));
+  const totalDistanceM = opts.includeDistance ? w.distanceM : undefined;
+  const totalVerticalM =
+    opts.includeVerticalAsAltitude && w.verticalM != null ? w.verticalM : undefined;
+  const calories = opts.includeCalories && w.calories != null ? Math.max(0, Math.round(w.calories)) : undefined;
+
+  const avgHr = w.metrics["AvgHr"];
+  const maxHr = w.metrics["MaxHr"];
+  const avgPower = w.metrics["AvgPower"];
+
+  const spmFromField = pickCadenceSpm(w.metrics);
+  const move = w.metrics["Move"];
+  const dur = w.metrics["Duration"] ?? w.durationSec ?? 0;
+  const defaultCadence =
+    opts.includeCadenceSeries
+      ? spmFromField ?? (move != null && dur > 0 ? move / (dur / 60) : undefined)
+      : undefined;
+  const defaultWatts = opts.includePowerSeries && avgPower != null ? Math.round(avgPower) : undefined;
+
+  const fit = new FitWriter({ noCompressedTimestamps: false });
+  const startFit = fit.time(new Date(startMs));
+
+  fit.writeMessage("file_id", {
+    type: "activity",
+    manufacturer: "garmin",
+    product: 0,
+    serial_number: 0,
+    time_created: startFit,
+    product_name: "mywellness2tcx",
+  }, null, true);
+
+  if (enhancedCompatibility) {
+    fit.writeMessage("file_creator", {
+      software_version: 100,
+      hardware_version: 1,
+    }, null, true);
+
+    fit.writeMessage("device_info", {
+      timestamp: startFit,
+      device_index: 0,
+      manufacturer: "garmin",
+      product: 0,
+      serial_number: 0,
+      software_version: 1.0,
+    }, null, true);
+
+    fit.writeMessage("event", {
+      timestamp: startFit,
+      event: "timer",
+      event_type: "start",
+      event_group: 0,
+    });
+  }
+
+  const hasSeries = Array.isArray(w.series) && w.series.length > 0;
+  const records: Array<{
+    tSec: number;
+    hr?: number;
+    cadence?: number;
+    watts?: number;
+    alt?: number;
+    dist: number;
+  }> = [];
+
+  if (hasSeries) {
+    const sortedSeries = [...(w.series ?? [])].sort((a, b) => a.tSec - b.tSec);
+    const hrAnchors = sortedSeries
+      .filter((p): p is SeriesPoint & { hr: number } => p.hr != null)
+      .sort((a, b) => a.tSec - b.tSec);
+    const hrAt = (tSec: number): number | undefined => {
+      if (!opts.includeHrSeries || hrAnchors.length === 0) return undefined;
+      if (hrAnchors.length === 1) return hrAnchors[0].hr;
+      if (tSec <= hrAnchors[0].tSec) return hrAnchors[0].hr;
+      const last = hrAnchors[hrAnchors.length - 1];
+      if (tSec >= last.tSec) return last.hr;
+      for (let i = 1; i < hrAnchors.length; i++) {
+        const a = hrAnchors[i - 1];
+        const b = hrAnchors[i];
+        if (tSec <= b.tSec) {
+          const span = b.tSec - a.tSec;
+          if (span <= 0) return b.hr;
+          const ratio = (tSec - a.tSec) / span;
+          return a.hr + (b.hr - a.hr) * ratio;
+        }
+      }
+      return last.hr;
+    };
+    const seriesTotalSec = Math.max(totalSeconds, sortedSeries[sortedSeries.length - 1]?.tSec ?? 0);
+    for (const p of sortedSeries) {
+      const t = Math.max(0, Math.round(p.tSec));
+      const hrRaw = hrAt(t);
+      const hr =
+        opts.includeHrSeries && hrRaw != null ? Math.round(hrRaw) : undefined;
+      const cadence =
+        opts.includeCadenceSeries
+          ? p.cadence != null
+            ? Math.round(p.cadence)
+            : defaultCadence != null
+              ? Math.round(defaultCadence)
+              : undefined
+          : undefined;
+      const watts =
+        opts.includePowerSeries
+          ? p.watts != null
+            ? Math.round(p.watts)
+            : defaultWatts
+          : undefined;
+      const dist =
+        totalDistanceM != null && seriesTotalSec > 0
+          ? totalDistanceM * (t / seriesTotalSec)
+          : 0;
+      const alt =
+        opts.includeVerticalAsAltitude
+          ? p.verticalM != null
+            ? p.verticalM
+            : totalVerticalM != null && seriesTotalSec > 0
+              ? totalVerticalM * (t / seriesTotalSec)
+              : undefined
+          : undefined;
+      records.push({ tSec: t, hr, cadence, watts, alt, dist });
+    }
+    if (opts.includeHrSeries && records.length > 0) {
+      let firstKnown: number | undefined;
+      for (const r of records) {
+        if (r.hr != null) {
+          firstKnown = r.hr;
+          break;
+        }
+      }
+      const fallbackHr =
+        firstKnown ??
+        (avgHr != null ? Math.round(avgHr) : maxHr != null ? Math.round(maxHr) : undefined);
+      if (fallbackHr != null) {
+        let prev = fallbackHr;
+        for (const r of records) {
+          if (r.hr == null) r.hr = prev;
+          else prev = r.hr;
+        }
+      }
+    }
+  } else {
+    const step = 5;
+    const n =
+      totalSeconds > 0 ? Math.max(2, Math.floor(totalSeconds / step) + 1) : 2;
+    for (let i = 0; i < n; i++) {
+      const t = Math.min(totalSeconds, i * step);
+      const hr =
+        opts.includeHrSeries && (avgHr != null || maxHr != null)
+          ? Math.round(avgHr ?? maxHr)
+          : undefined;
+      const dist =
+        totalDistanceM != null && totalSeconds > 0
+          ? totalDistanceM * (t / totalSeconds)
+          : 0;
+      const alt =
+        totalVerticalM != null && totalSeconds > 0
+          ? totalVerticalM * (t / totalSeconds)
+          : undefined;
+      const cadence = defaultCadence != null ? Math.round(defaultCadence) : undefined;
+      records.push({ tSec: t, hr, cadence, watts: defaultWatts, alt, dist });
+    }
+  }
+
+  const lastTSec = records.length ? records[records.length - 1].tSec : totalSeconds;
+  const totalTime = Math.max(1, lastTSec);
+  const avgSpeed = totalDistanceM != null && totalTime > 0 ? totalDistanceM / totalTime : undefined;
+  const maxSpeed = avgSpeed != null ? avgSpeed * 1.08 : undefined;
+  const totalAscent = totalVerticalM != null ? Math.max(0, totalVerticalM) : undefined;
+  const totalDescent = totalVerticalM != null ? 0 : undefined;
+  const totalWork =
+    avgPower != null
+      ? Math.max(0, Math.round(avgPower * totalTime))
+      : undefined;
+
+  for (const r of records) {
+    fit.writeMessage("record", {
+      timestamp: fit.time(new Date(startMs + r.tSec * 1000)),
+      distance: r.dist,
+      heart_rate: r.hr,
+      cadence: r.cadence,
+      power: r.watts,
+      altitude: r.alt,
+    });
+  }
+
+  const sport = pickFitSport(w);
+  const endFit = fit.time(new Date(startMs + Math.max(1, lastTSec) * 1000));
+
+  fit.writeMessage("lap", {
+    timestamp: endFit,
+    start_time: startFit,
+    total_elapsed_time: totalTime,
+    total_timer_time: totalTime,
+    total_distance: totalDistanceM ?? 0,
+    total_calories: calories,
+    total_ascent: totalAscent,
+    total_descent: totalDescent,
+    avg_speed: avgSpeed,
+    max_speed: maxSpeed,
+    avg_heart_rate: avgHr != null ? Math.round(avgHr) : undefined,
+    max_heart_rate: maxHr != null ? Math.round(maxHr) : undefined,
+    avg_power: avgPower != null ? Math.round(avgPower) : undefined,
+    total_work: totalWork,
+    avg_cadence: defaultCadence != null ? Math.round(defaultCadence) : undefined,
+  }, null, true);
+
+  fit.writeMessage("session", {
+    timestamp: endFit,
+    start_time: startFit,
+    total_elapsed_time: totalTime,
+    total_timer_time: totalTime,
+    total_distance: totalDistanceM ?? 0,
+    total_calories: calories,
+    total_ascent: totalAscent,
+    total_descent: totalDescent,
+    avg_speed: avgSpeed,
+    max_speed: maxSpeed,
+    total_work: totalWork,
+    sport: sport.sport,
+    sub_sport: sport.subSport,
+    num_laps: 1,
+    avg_heart_rate: avgHr != null ? Math.round(avgHr) : undefined,
+    max_heart_rate: maxHr != null ? Math.round(maxHr) : undefined,
+    avg_power: avgPower != null ? Math.round(avgPower) : undefined,
+    avg_cadence: defaultCadence != null ? Math.round(defaultCadence) : undefined,
+  }, null, true);
+
+  fit.writeMessage("activity", {
+    timestamp: endFit,
+    total_timer_time: totalTime,
+    num_sessions: 1,
+    type: "manual",
+  }, null, true);
+
+  if (enhancedCompatibility) {
+    fit.writeMessage("event", {
+      timestamp: endFit,
+      event: "timer",
+      event_type: "stop_all",
+      event_group: 0,
+    }, null, true);
+
+    fit.writeMessage("device_info", {
+      timestamp: endFit,
+      device_index: 0,
+      manufacturer: "garmin",
+      product: 0,
+      serial_number: 0,
+      software_version: 1.0,
+    }, null, true);
+  }
+
+  const data = fit.finish();
+  const out = new Uint8Array(data.byteLength);
+  out.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  return out.buffer;
+}
+
+function extractWorkoutsFromIndoorJSON(obj: unknown): Workout[] {
 
   const items = Array.isArray(obj) ? obj : [];
-  return items.map((raw: any, idx: number) => {
+  return items.map((raw: unknown, idx: number) => {
+    const rawRec = asRecord(raw);
     const metrics = prToMap(raw);
-    const startedAt = raw?.on;
+    const startedAt = rawRec?.on;
     const durationSec = metrics["Duration"];
     const calories = metrics["Calories"];
     const distanceM = pickDistanceM(metrics);
@@ -253,12 +675,14 @@ function extractWorkoutsFromIndoorJSON(obj: any): Workout[] {
 
     // Best-effort naming (improve later using facility metadata if present)
     const activityName =
-      raw?.activityName ||
+      rawRec?.activityName ||
       (verticalM != null ? "Stair climber" : "Indoor workout");
 
-    const id = String(raw?.id ?? `${startedAt ?? "ind"}-${idx}`);
+    const id = String(rawRec?.id ?? `${startedAt ?? "ind"}-${idx}`);
+    const uid = `indoor-${String(startedAt ?? "unknown")}-${id}-${idx}`;
 
     return {
+      uid,
       source: "indoor",
       id,
       startedAtISO: typeof startedAt === "string" ? startedAt : undefined,
@@ -287,31 +711,35 @@ function extractWorkoutsFromIndoorJSON(obj: any): Workout[] {
   });
 }
 
-function extractWorkoutsFromOutdoorJSON(obj: any): Workout[] {
+function extractWorkoutsFromOutdoorJSON(obj: unknown): Workout[] {
+  const objRec = asRecord(obj);
   const items = Array.isArray(obj)
     ? obj
-    : (obj?.items ?? obj?.activities ?? obj?.data ?? []);
+    : (objRec?.items ?? objRec?.activities ?? objRec?.data ?? []);
   if (!Array.isArray(items)) return [];
 
-  return items.map((raw: any, idx: number) => {
+  return items.map((raw: unknown, idx: number) => {
+    const rawRec = asRecord(raw);
     const metrics = prToMap(raw);
     const durationSec =
       metrics["Duration"] ??
-      safeNumber(raw?.duration) ??
-      safeNumber(raw?.Duration);
+      safeNumber(rawRec?.duration) ??
+      safeNumber(rawRec?.Duration);
     const calories =
       metrics["Calories"] ??
-      safeNumber(raw?.calories) ??
-      safeNumber(raw?.Calories);
+      safeNumber(rawRec?.calories) ??
+      safeNumber(rawRec?.Calories);
     const distanceM = pickDistanceM(metrics);
     const verticalM = pickVerticalM(metrics);
     const cadenceSpm = pickCadenceSpm(metrics);
 
-    const startedAt = raw?.performedDate ?? raw?.on;
-    const activityName = raw?.activityName ?? "Outdoor workout";
-    const id = String(raw?.id ?? raw?.uuid ?? `${startedAt ?? "out"}-${idx}`);
+    const startedAt = rawRec?.performedDate ?? rawRec?.on;
+    const activityName = rawRec?.activityName ?? "Outdoor workout";
+    const id = String(rawRec?.id ?? rawRec?.uuid ?? `${startedAt ?? "out"}-${idx}`);
+    const uid = `outdoor-${String(startedAt ?? "unknown")}-${id}-${idx}`;
 
     return {
+      uid,
       source: "outdoor",
       id,
       startedAtISO: typeof startedAt === "string" ? startedAt : undefined,
@@ -340,6 +768,190 @@ function extractWorkoutsFromOutdoorJSON(obj: any): Workout[] {
   });
 }
 
+function extractWorkoutFromSinglePageJSON(
+  obj: unknown,
+  preferredStartTime?: string,
+): Workout | null {
+  const root = asRecord(obj);
+  const core = asRecord(root?.data) ?? root;
+  if (!core) return null;
+
+  const analytics = asRecord(core.analitics);
+  const descriptors = Array.isArray(analytics?.descriptor) ? analytics.descriptor : [];
+  const samples = Array.isArray(analytics?.samples) ? analytics.samples : [];
+  const hrSamples = Array.isArray(analytics?.hr) ? analytics.hr : [];
+  const summaryData = Array.isArray(core.data) ? core.data : [];
+
+  const descriptorByIndex = new Map<number, string>();
+  for (const d of descriptors) {
+    const rec = asRecord(d);
+    const i = safeNumber(rec?.i);
+    const pr = asRecord(rec?.pr);
+    const name = typeof pr?.name === "string" ? pr.name : undefined;
+    if (i != null && name) descriptorByIndex.set(i, name);
+  }
+
+  const hrByT = new Map<number, number>();
+  for (const h of hrSamples) {
+    const rec = asRecord(h);
+    const t = safeNumber(rec?.t);
+    const hr = safeNumber(rec?.hr);
+    if (t != null && hr != null) hrByT.set(Math.round(t), hr);
+  }
+  const hrAnchors = [...hrByT.entries()]
+    .map(([tSec, hr]) => ({ tSec, hr }))
+    .sort((a, b) => a.tSec - b.tSec);
+  const hrAt = (tSec: number): number | undefined => {
+    if (hrAnchors.length === 0) return undefined;
+    if (hrAnchors.length === 1) return hrAnchors[0].hr;
+    if (tSec <= hrAnchors[0].tSec) return hrAnchors[0].hr;
+    const last = hrAnchors[hrAnchors.length - 1];
+    if (tSec >= last.tSec) return last.hr;
+    for (let i = 1; i < hrAnchors.length; i++) {
+      const a = hrAnchors[i - 1];
+      const b = hrAnchors[i];
+      if (tSec <= b.tSec) {
+        const span = b.tSec - a.tSec;
+        if (span <= 0) return b.hr;
+        const ratio = (tSec - a.tSec) / span;
+        return a.hr + (b.hr - a.hr) * ratio;
+      }
+    }
+    return last.hr;
+  };
+
+  const series: SeriesPoint[] = [];
+  for (const s of samples) {
+    const rec = asRecord(s);
+    const t = safeNumber(rec?.t);
+    const vs = asNumberArray(rec?.vs);
+    if (t == null) continue;
+
+    const point: SeriesPoint = { tSec: Math.max(0, Math.round(t)) };
+    for (let idx = 0; idx < vs.length; idx++) {
+      const key = descriptorByIndex.get(idx)?.toLowerCase();
+      const value = vs[idx];
+      if (!key) continue;
+      if (key === "power") point.watts = value;
+      if (key === "spm") point.cadence = value;
+      if (key === "floors" || key === "elevation") point.verticalM = value;
+    }
+    const hr = hrAt(point.tSec);
+    if (hr != null) point.hr = Math.round(hr);
+    series.push(point);
+  }
+
+  series.sort((a, b) => a.tSec - b.tSec);
+
+  let durationSec = series.length ? series[series.length - 1].tSec : undefined;
+  let move: number | undefined;
+  for (const item of summaryData) {
+    const rec = asRecord(item);
+    const property = typeof rec?.property === "string" ? rec.property.toLowerCase() : "";
+    const name = typeof rec?.name === "string" ? rec.name.toLowerCase() : "";
+    if (property.includes("duration") || name.includes("duration")) {
+      const fromRawMin = safeNumber(rec?.rawValue);
+      const fromText = typeof rec?.value === "string" ? parseDurationString(rec.value) : undefined;
+      durationSec = fromText ?? (fromRawMin != null ? Math.round(fromRawMin * 60) : durationSec);
+    }
+    if (property.includes("move") || name.includes("move")) {
+      move = safeNumber(rec?.rawValue);
+    }
+  }
+
+  const hrValues = series.map((p) => p.hr).filter((x): x is number => x != null);
+  const powerValues = series.map((p) => p.watts).filter((x): x is number => x != null);
+  const cadenceValues = series.map((p) => p.cadence).filter((x): x is number => x != null);
+  const verticalValues = series.map((p) => p.verticalM).filter((x): x is number => x != null);
+
+  const metrics: Record<string, number> = {};
+  if (durationSec != null) metrics["Duration"] = durationSec;
+  if (move != null) metrics["Move"] = move;
+  if (hrValues.length) {
+    const avgHr = average(hrValues);
+    if (avgHr != null) metrics["AvgHr"] = avgHr;
+    metrics["MaxHr"] = Math.max(...hrValues);
+  }
+  if (powerValues.length) {
+    const avgPower = average(powerValues);
+    if (avgPower != null) metrics["AvgPower"] = avgPower;
+  }
+  if (cadenceValues.length) {
+    const avgSpm = average(cadenceValues);
+    if (avgSpm != null) metrics["AvgSpm"] = avgSpm;
+  }
+  if (verticalValues.length) {
+    metrics["Floors"] = Math.max(...verticalValues);
+  }
+
+  const dateStr = typeof core.date === "string" ? core.date : undefined;
+  const parsedDate = dateStr ? new Date(dateStr) : undefined;
+  let startedAtISO = parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : undefined;
+  if (startedAtISO && preferredStartTime) {
+    const match = preferredStartTime.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (match) {
+      const hh = Number(match[1]);
+      const mm = Number(match[2]);
+      const ss = Number(match[3] ?? "0");
+      if (
+        Number.isFinite(hh) && hh >= 0 && hh < 24 &&
+        Number.isFinite(mm) && mm >= 0 && mm < 60 &&
+        Number.isFinite(ss) && ss >= 0 && ss < 60
+      ) {
+        const dt = new Date(startedAtISO);
+        dt.setHours(hh, mm, ss, 0);
+        startedAtISO = dt.toISOString();
+      }
+    }
+  }
+
+  const activityName =
+    typeof core.physicalActivityName === "string"
+      ? core.physicalActivityName
+      : typeof core.name === "string"
+        ? core.name
+        : typeof core.equipmentType === "string"
+          ? core.equipmentType
+          : "MyWellness workout";
+
+  const id =
+    typeof core.cardioLogId === "string"
+      ? core.cardioLogId
+      : typeof core.physicalActivityId === "string"
+        ? core.physicalActivityId
+        : `json-${Date.now()}`;
+
+  const verticalM = verticalValues.length ? Math.max(...verticalValues) : undefined;
+  const cadenceSpm = average(cadenceValues);
+
+  return {
+    uid: `json-${id}`,
+    source: "indoor",
+    id,
+    startedAtISO,
+    startedAtDisplay: startedAtISO ? formatDateHuman(startedAtISO) : "—",
+    activityName,
+    durationSec,
+    calories: undefined,
+    distanceM: pickDistanceM(metrics),
+    verticalM,
+    cadenceSpm: cadenceSpm != null ? cadenceSpm : undefined,
+    metrics,
+    metricKeys: Object.keys(metrics).sort(),
+    raw: core,
+    series,
+    exportOpts: {
+      includeHrSeries: hrValues.length > 0,
+      includeCadenceSeries: cadenceValues.length > 0,
+      includePowerSeries: powerValues.length > 0,
+      includeMetricsInNotes: false,
+      includeCalories: false,
+      includeDistance: pickDistanceM(metrics) != null,
+      includeVerticalAsAltitude: verticalM != null,
+    },
+  };
+}
+
 function computeSummary(ws: Workout[]) {
   const indoor = ws.filter((w) => w.source === "indoor").length;
   const outdoor = ws.filter((w) => w.source === "outdoor").length;
@@ -352,11 +964,21 @@ function computeSummary(ws: Workout[]) {
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const FEEDBACK_URL =
+    "https://github.com/travist85/mywellness2tcx/issues/new/choose";
+
+
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [zipName, setZipName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [didParse, setDidParse] = useState(false);
+  const [importMode, setImportMode] = useState<ImportMode>("zip");
+  const [lastImportMode, setLastImportMode] = useState<ImportMode | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("tcx");
+  const [enhancedFitCompatibility, setEnhancedFitCompatibility] = useState(false);
+  const [jsonInput, setJsonInput] = useState("");
+  const [jsonStartTime, setJsonStartTime] = useState("12:00");
 
   const sortedWorkouts = useMemo(() => {
     return [...workouts].sort((a, b) => {
@@ -368,11 +990,16 @@ export default function App() {
 
   const summary = useMemo(() => computeSummary(sortedWorkouts), [sortedWorkouts]);
 
-  async function onZipSelected(file: File | null) {
+  function resetParsedState() {
     setError(null);
     setWorkouts([]);
     setZipName(null);
     setDidParse(false);
+    setLastImportMode(null);
+  }
+
+  async function onZipSelected(file: File | null) {
+    resetParsedState();
 
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".zip")) {
@@ -392,10 +1019,11 @@ export default function App() {
 
       const targetNames = fileEntries.filter((n) => {
         const lower = n.toLowerCase();
+        const basename = lower.split("/").pop() ?? lower;
         return (
-          (lower.startsWith("indooractivities-") ||
-            lower.startsWith("outdooractivities-")) &&
-          lower.endsWith(".json")
+          (basename.startsWith("indooractivities-") ||
+            basename.startsWith("outdooractivities-")) &&
+          basename.endsWith(".json")
         );
       });
 
@@ -410,17 +1038,18 @@ export default function App() {
 
       for (const name of targetNames) {
         const lower = name.toLowerCase();
+        const basename = lower.split("/").pop() ?? lower;
         const text = await zip.files[name].async("string");
-        let obj: any;
+        let obj: unknown;
         try {
           obj = JSON.parse(text);
         } catch {
           continue;
         }
 
-        if (lower.startsWith("indooractivities-")) {
+        if (basename.startsWith("indooractivities-")) {
           all.push(...extractWorkoutsFromIndoorJSON(obj));
-        } else if (lower.startsWith("outdooractivities-")) {
+        } else if (basename.startsWith("outdooractivities-")) {
           all.push(...extractWorkoutsFromOutdoorJSON(obj));
         }
       }
@@ -434,27 +1063,64 @@ export default function App() {
 
       setWorkouts(all);
       setDidParse(true);
-    } catch (e: any) {
-      setError(`Failed to read ZIP: ${e?.message ?? String(e)}`);
+      setLastImportMode("zip");
+    } catch (e: unknown) {
+      if (e instanceof Error) {
+        setError(`Failed to read ZIP: ${e.message}`);
+      } else {
+        setError(`Failed to read ZIP: ${String(e)}`);
+      }
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  function onParsePastedJson() {
+    resetParsedState();
+    const text = jsonInput.trim();
+    if (!text) {
+      setError("Paste a JSON object from a single MyWellness Training Workout page first.");
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      const workout = extractWorkoutFromSinglePageJSON(parsed, jsonStartTime);
+      if (!workout) {
+        setError("Couldn’t find a supported single-workout payload in this JSON.");
+        return;
+      }
+
+      setWorkouts([workout]);
+      setZipName("mywellness-single-workout");
+      setDidParse(true);
+      setLastImportMode("json");
+    } catch (e: unknown) {
+      if (e instanceof Error) {
+        setError(`Invalid JSON: ${e.message}`);
+      } else {
+        setError("Invalid JSON payload.");
+      }
     }
   }
 
   async function downloadAllAsZip() {
     const zip = new JSZip();
     for (const w of sortedWorkouts) {
-      const tcx = workoutToTCX(w, w.exportOpts);
-      const safeDate = (w.startedAtISO ? new Date(w.startedAtISO) : new Date())
-        .toISOString()
-        .replace(/[:]/g, "")
-        .replace(/\..+/, "Z");
-      const fname = `mywellness-${w.source}-${safeDate}-${w.id}.tcx`;
-      zip.file(fname, tcx);
+      const safeDate = safeDateToken(w.startedAtISO);
+      if (exportFormat === "fit") {
+        const fit = workoutToFIT(w, w.exportOpts, enhancedFitCompatibility);
+        const fname = `mywellness-${w.source}-${safeDate}-${w.id}.fit`;
+        zip.file(fname, fit);
+      } else {
+        const tcx = workoutToTCX(w, w.exportOpts);
+        const fname = `mywellness-${w.source}-${safeDate}-${w.id}.tcx`;
+        zip.file(fname, tcx);
+      }
     }
     const blob = await zip.generateAsync({ type: "blob" });
     const base = (zipName ?? "mywellness").replace(/\.zip$/i, "");
-    downloadBlob(`${base}-tcx.zip`, blob);
+    downloadBlob(`${base}-${exportFormat}.zip`, blob);
   }
 
   function updateWorkoutOpts(
@@ -463,125 +1129,255 @@ export default function App() {
   ) {
     setWorkouts((prev) =>
       prev.map((x) =>
-        x.source === w.source && x.id === w.id
+        x.uid === w.uid
           ? { ...x, exportOpts: { ...x.exportOpts, ...patch } }
           : x
       )
     );
   }
 
-  const cardStyle: any = {
-    border: "1px solid #94a3b8 !important",
-    borderRadius: 16,
-    background: "#f9fafb !important",
-    padding: 18,
-  };
-
-  const downloadButtonStyle: any = {
+  const downloadButtonStyle: CSSProperties = {
     padding: "10px 12px",
     borderRadius: 10,
-    border: "1px solid #3b82f6 !important",
-    background: "#3b82f6 !important",
-    color: "#ffffff !important",
+    border: "1px solid #3b82f6",
+    background: "#3b82f6",
+    color: "#ffffff",
     cursor: "pointer",
     fontWeight: 600,
   };
 
-  const subtleText: any = { fontSize: 13, opacity: 0.78, lineHeight: 1.4 };
+  const subtleText: CSSProperties = { fontSize: 13, opacity: 0.78, lineHeight: 1.4 };
 
-  const thStyle: any = {
+  const thStyle: CSSProperties = {
     padding: "10px 8px",
-    border: "1px solid #94a3b8 !important",
-    borderBottom: "2px solid #475569 !important",
-    background: "#f1f5f9 !important",
+    border: "1px solid #94a3b8",
+    borderBottom: "2px solid #475569",
+    background: "#f1f5f9",
     fontWeight: 700,
     fontSize: 13,
   };
-  const tdStyle: any = {
+  const tdStyle: CSSProperties = {
     padding: "8px 8px",
     verticalAlign: "middle",
   };
-  const tdCenter: any = { ...tdStyle, textAlign: "center !important" };
-  const tdNoWrap: any = { ...tdStyle, whiteSpace: "nowrap" };
-  const tdValueRow: any = { ...tdStyle, borderBottom: "none !important" };
-  const tdValueRowCenter: any = { ...tdCenter, borderBottom: "none !important" };
-  const tdValueRowNoWrap: any = { ...tdNoWrap, borderBottom: "none !important" };
-  const tdCheck: any = { ...tdStyle, padding: "6px 8px" };
-  const tdCheckCenter: any = { ...tdCheck, textAlign: "center !important" };
+  const tdCenter: CSSProperties = { ...tdStyle, textAlign: "center" };
+  const tdNoWrap: CSSProperties = { ...tdStyle, whiteSpace: "nowrap" };
+  const tdValueRow: CSSProperties = { ...tdStyle, borderBottom: "none" };
+  const tdValueRowCenter: CSSProperties = { ...tdCenter, borderBottom: "none" };
+  const tdValueRowNoWrap: CSSProperties = { ...tdNoWrap, borderBottom: "none" };
+  const tdCheck: CSSProperties = { ...tdStyle, padding: "6px 8px" };
+  const tdCheckCenter: CSSProperties = { ...tdCheck, textAlign: "center" };
 
   return (
     <div
       style={{
         minHeight: "100vh",
-        background: "#f1f5f9 !important",
+        background: "#f1f5f9",
         color: "#0f172a",
       }}
     >
-      <div style={{ maxWidth: 1040, margin: "0 auto", padding: 28 }}>
-        <header style={{ marginTop: 6 }}>
+      <div style={{ maxWidth: 1040, margin: "0 auto", padding: 28, width: "100%" }}>
+        <header style={{ marginTop: 6, position: "relative", paddingRight: 120 }}>
           <h1 style={{ margin: 0, fontSize: 42, letterSpacing: -0.5 }}>
-            Convert MyWellness Workouts to TCX Files
+            Technogym/MyWellness to TCX/FIT Converter
           </h1>
-          <p style={{ marginTop: 10, ...subtleText, fontSize: 16 }}>
-            Upload your <b>Mywellness ZIP export</b> and download{" "}
-            <b>TCX files.</b> Runs entirely in your browser —{" "}
-            <b>no login</b>, <b>no uploads</b>.
-          </p>
-        </header>
 
-        {/* Hero upload */}
-        <div style={{ display: "grid", border: "1px solid #94a3b8", borderWidth: 2, borderStyle: "dashed", borderRadius: 12, gridTemplateColumns: "1fr", gap: 16, marginTop: 18, background: "#f9fafb" }}>
+          <p style={{ marginTop: 10, ...subtleText, fontSize: 16 }}>
+            Import data from Technogym/MyWellness and download <b>TCX or FIT files.</b>{" "}
+            Upload a ZIP export or paste a single workout JSON payload.
+          </p>
+          <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+            <span style={{ ...subtleText }}>✅ Runs locally</span>
+            <span style={{ ...subtleText }}>✅ No account</span>
+            <span style={{ ...subtleText }}>✅ Ignores all sensitive data</span>
+          </div>
+
           <div
             style={{
-              ...cardStyle,
-              padding: 22,
+              position: "absolute",
+              top: 0,
+              right: 0,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              alignItems: "flex-end",
             }}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              const f = e.dataTransfer.files?.[0] ?? null;
-              void onZipSelected(f);
-            }}
-            role="button"
-            tabIndex={0}
           >
-            <div
+
+            <a
+              href={FEEDBACK_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               style={{
+                padding: "6px 8px",
+                borderRadius: 10,
+                border: "1px solid #94a3b8",
+                background: "#ffffff",
+                color: "#0f172a",
+                textDecoration: "none",
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+              }}
+            >
+              ❗ Issues
+            </a>
+            <a
+              href="mailto:travis@polygon.com.au?subject=mywellness2tcx%20feedback"
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid #94a3b8",
+                background: "#ffffff",
+                color: "#0f172a",
+                textDecoration: "none",
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+              }}
+            >
+              📩 Email me
+            </a>
 
-                fontWeight: 700,
-                fontSize: 16
-              }}>
-              Upload Mywellness ZIP
+
+          </div>
+        </header>
+
+
+
+
+
+        {/* Hero upload */}
+        <div
+          style={{
+            marginTop: 16,
+            border: "1px dashed #94a3b8",
+            borderRadius: 16,
+            overflow: "hidden",
+            background: "#f9fafb",
+          }}
+        >
+
+          <div style={{ padding: "16px 16px" }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+              <button
+                type="button"
+                style={{
+                  ...downloadButtonStyle,
+                  background: importMode === "zip" ? "#3b82f6" : "#ffffff",
+                  color: importMode === "zip" ? "#ffffff" : "#0f172a",
+                  borderColor: "#94a3b8",
+                }}
+                onClick={() => setImportMode("zip")}
+              >
+                Upload ZIP
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...downloadButtonStyle,
+                  background: importMode === "json" ? "#3b82f6" : "#ffffff",
+                  color: importMode === "json" ? "#ffffff" : "#0f172a",
+                  borderColor: "#94a3b8",
+                }}
+                onClick={() => setImportMode("json")}
+              >
+                Paste JSON
+              </button>
             </div>
-            <div style={{ marginTop: 8, ...subtleText }}>
-              Drag & drop your export <code>.zip</code> here, or click to browse (export zip file from MyWellness Account Settings)
-            </div>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip"
-              style={{ display: "none" }}
-              onChange={(e) => void onZipSelected(e.target.files?.[0] ?? null)}
-            />
+            {importMode === "zip" ? (
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const f = e.dataTransfer.files?.[0] ?? null;
+                  void onZipSelected(f);
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <div style={{ fontWeight: 700, fontSize: 16 }}>Upload Technogym/MyWellness ZIP</div>
+                <div style={{ marginTop: 8, ...subtleText }}>
+                  Drag and drop your export <code>.zip</code> here, or click to browse.
+                </div>
 
-            <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-              <span style={{ ...subtleText }}>✅ Runs locally</span>
-              <span style={{ ...subtleText }}>✅ No account</span>
-              <span style={{ ...subtleText }}>
-                ✅ Ignores all sensitive data
-              </span>
-            </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".zip"
+                  style={{ display: "none" }}
+                  onChange={(e) => void onZipSelected(e.target.files?.[0] ?? null)}
+                />
 
-            {zipName && !error && (
+                {!zipName && !isLoading && !error && (
+                  <div style={{ marginTop: 14, ...subtleText }}>
+                    Reads only{" "}
+                    <code style={{ backgroundColor: "#dbe2ee" }}>indooractivities-*.json</code> and{" "}
+                    <code style={{ backgroundColor: "#dbe2ee" }}>outdooractivities-*.json</code>.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16 }}>Paste Single Workout JSON</div>
+                <div style={{ marginTop: 8, ...subtleText }}>
+                  Paste the JSON payload copied from a MyWellness Training Workout page, then parse it.
+                </div>
+                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <label htmlFor="json-start-time" style={{ ...subtleText, fontWeight: 600, opacity: 1 }}>
+                    Workout start time:
+                  </label>
+                  <input
+                    id="json-start-time"
+                    type="time"
+                    step={1}
+                    value={jsonStartTime}
+                    onChange={(e) => setJsonStartTime(e.target.value)}
+                    style={{
+                      borderRadius: 8,
+                      border: "1px solid #94a3b8",
+                      padding: "6px 8px",
+                      background: "#ffffff",
+                      color: "#0f172a",
+                    }}
+                  />
+                  <span style={subtleText}>Date comes from JSON; time comes from this field.</span>
+                </div>
+                <textarea
+                  value={jsonInput}
+                  onChange={(e) => setJsonInput(e.target.value)}
+                  placeholder='{"data":{...}}'
+                  style={{
+                    marginTop: 10,
+                    width: "100%",
+                    minHeight: 180,
+                    borderRadius: 10,
+                    border: "1px solid #94a3b8",
+                    padding: 10,
+                    fontFamily: "Consolas, monospace",
+                    fontSize: 13,
+                    boxSizing: "border-box",
+                  }}
+                />
+                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+                  <button type="button" style={downloadButtonStyle} onClick={onParsePastedJson}>
+                    Parse JSON
+                  </button>
+                  <span style={subtleText}>Supports one workout per paste.</span>
+                </div>
+              </div>
+            )}
+
+            {zipName && !error && lastImportMode === "zip" && (
               <div style={{ marginTop: 14, fontSize: 14 }}>
                 <b>Loaded:</b> {zipName} — <b>{sortedWorkouts.length}</b>{" "}
-                workouts detected
+                workout{sortedWorkouts.length === 1 ? "" : "s"} detected
               </div>
             )}
 
@@ -597,14 +1393,6 @@ export default function App() {
                 }}
               >
                 <b>Error:</b> {error}
-              </div>
-            )}
-
-            {!zipName && !isLoading && !error && (
-              <div style={{ marginTop: 14, ...subtleText }}>
-                This tool reads <b>only</b> {" "}
-                <code style={{ backgroundColor: "#dbe2ee" }}>indooractivities-*.json</code> and {" "}
-                <code style={{ backgroundColor: "#dbe2ee" }}>outdooractivities-*.json</code>
               </div>
             )}
           </div>
@@ -632,23 +1420,60 @@ export default function App() {
                 </div>
 
                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <button
-                    style={{
-                      ...downloadButtonStyle,
-                      opacity: sortedWorkouts.length ? 1 : 0.5,
-                    }}
-                    disabled={!sortedWorkouts.length}
-                    onClick={() => void downloadAllAsZip()}
-                    title="Download all workouts as a single ZIP of TCX files"
-                  >
-                    Download all as ZIP
-                  </button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", ...subtleText, opacity: 1 }}>
+                      <span style={{ fontWeight: 600 }}>Format:</span>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <input
+                          type="radio"
+                          name="export-format"
+                          checked={exportFormat === "tcx"}
+                          onChange={() => setExportFormat("tcx")}
+                        />
+                        TCX
+                      </label>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <input
+                          type="radio"
+                          name="export-format"
+                          checked={exportFormat === "fit"}
+                          onChange={() => setExportFormat("fit")}
+                        />
+                        FIT
+                      </label>
+                    </div>
+                    {exportFormat === "fit" && (
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 6, ...subtleText }}>
+                        <input
+                          type="checkbox"
+                          checked={enhancedFitCompatibility}
+                          onChange={(e) => setEnhancedFitCompatibility(e.target.checked)}
+                        />
+                        Enhanced FIT compatibility (experimental)
+                      </label>
+                    )}
+                  </div>
+                  {lastImportMode === "zip" && (
+                    <button
+                      style={{
+                        ...downloadButtonStyle,
+                        opacity: sortedWorkouts.length ? 1 : 0.5,
+                      }}
+                      disabled={!sortedWorkouts.length}
+                      onClick={() => void downloadAllAsZip()}
+                      title={`Download all workouts as a single ZIP of ${exportFormat.toUpperCase()} files`}
+                    >
+                      Download all as ZIP ({exportFormat.toUpperCase()})
+                    </button>
+                  )}
                 </div>
-                <div style={{ marginTop: 8, fontSize: 14 }}>
-                  <span style={{}}>
-                    <b>Note: </b>The MyWellness zip export only provides total workout values, so per-trackpoint data is estimated from averages.
-                  </span>
-                </div>
+                {lastImportMode === "zip" && (
+                  <div style={{ marginTop: 8, fontSize: 14 }}>
+                    <span>
+                      <b>Note: </b>The MyWellness zip export only provides total workout values, so per-trackpoint data is estimated from averages.
+                    </span>
+                  </div>
+                )}
               </div>
 
             </div>
@@ -684,8 +1509,8 @@ export default function App() {
                 </thead>
                 <tbody>
                   {sortedWorkouts.map((w) => (
-                    <>
-                      <tr key={`${w.source}-${w.id}-values`}>
+                    <Fragment key={w.uid}>
+                      <tr>
                         <td style={tdValueRow}>
                           {w.startedAtDisplay}
                         </td>
@@ -744,21 +1569,24 @@ export default function App() {
                           <button
                             style={{ ...downloadButtonStyle, whiteSpace: "nowrap" }}
                             onClick={() => {
-                              const tcx = workoutToTCX(w, w.exportOpts);
-                              const safeDate = (w.startedAtISO ? new Date(w.startedAtISO) : new Date())
-                                .toISOString()
-                                .replace(/[:]/g, "")
-                                .replace(/\..+/, "Z");
-                              const fname = `mywellness-${w.source}-${safeDate}-${w.id}.tcx`;
-                              downloadTextFile(fname, tcx);
+                              const safeDate = safeDateToken(w.startedAtISO);
+                              if (exportFormat === "fit") {
+                                const fit = workoutToFIT(w, w.exportOpts, enhancedFitCompatibility);
+                                const fname = `mywellness-${w.source}-${safeDate}-${w.id}.fit`;
+                                downloadBlob(fname, new Blob([fit], { type: "application/octet-stream" }));
+                              } else {
+                                const tcx = workoutToTCX(w, w.exportOpts);
+                                const fname = `mywellness-${w.source}-${safeDate}-${w.id}.tcx`;
+                                downloadTextFile(fname, tcx);
+                              }
                             }}
                           >
-                            Download TCX
+                            Download {exportFormat.toUpperCase()}
                           </button>
                         </td>
                       </tr>
 
-                      <tr key={`${w.source}-${w.id}-checks`} style={{ background: "#f8fafc !important" }}>
+                      <tr style={{ background: "#f8fafc" }}>
                         <td style={tdCheck}></td>
                         <td style={tdCheck}></td>
                         <td style={tdCheck}></td>
@@ -828,7 +1656,7 @@ export default function App() {
 
                         <td style={tdCheck}></td>
                       </tr>
-                    </>
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
@@ -838,13 +1666,14 @@ export default function App() {
         )}
 
         {/* Footer */}
-        <footer style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #cbd5e1 !important", ...subtleText }}>
+        <footer style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #cbd5e1", ...subtleText }}>
           <div>
-            Privacy: processed locally in your browser. This tool reads only the activity JSON files and ignores biometrics/masterdata.
+            Privacy: processed locally in your browser. This tool reads only workout data and ignores biometric/private information.
           </div>
           <div style={{ marginTop: 6 }}>
             Not affiliated with Technogym, MyWellness or Garmin.
           </div>
+
         </footer>
       </div>
     </div>

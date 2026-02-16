@@ -1,0 +1,30 @@
+name: Bug report
+description: Report a problem with the tool
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the issue
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do?
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Sample files (optional)
+      description: You can drag/drop files here
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, OS, etc.

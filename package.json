@@ -7,9 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "validate:fit": "node scripts/validate-fit.mjs"
   },
   "dependencies": {
+    "@markw65/fit-file-writer": "^0.1.7",
+    "fit-file-parser": "^2.3.3",
     "jszip": "^3.10.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

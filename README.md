@@ -1,73 +1,38 @@
-# React + TypeScript + Vite
+# Technogym/MyWellness to TCX/FIT Converter
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Browser-based converter for Technogym/MyWellness workout exports.
 
-Currently, two official plugins are available:
+## Features
+- Import a MyWellness ZIP export
+- Paste a single workout JSON payload
+- Export workouts as `TCX` or `FIT`
+- Optional enhanced FIT compatibility mode
+- Local-only processing (no upload required)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Development
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Validation
+```bash
+npm run -s lint
+npm run -s build
+npm run -s validate:fit
 ```
+
+## Documentation Maintenance Checklist
+Update these files whenever behavior, UI wording, export logic, or known issues change:
+
+- `docs/CONTEXT_HANDOVER.md`
+- `docs/DECISIONS.md`
+- `docs/FIT_HR_INVESTIGATION.md` (when FIT/HR work is touched)
+- `docs/RESUME_CHECKLIST.md` (when workflow or priorities change)
+
+Minimum update routine per meaningful change:
+
+1. Add or update a decision entry in `docs/DECISIONS.md`.
+2. Refresh active status and risks in `docs/CONTEXT_HANDOVER.md`.
+3. If FIT/HR-related: update findings and next checks in `docs/FIT_HR_INVESTIGATION.md`.
+4. Confirm `docs/RESUME_CHECKLIST.md` still reflects current next steps.

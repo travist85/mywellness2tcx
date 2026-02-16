@@ -91,7 +91,7 @@ tr:last-child td {
   border-bottom: 2px solid #cbd5e1 !important;
 }
 
-/* Last row still needs bottom border */
+/* Keep the last tbody row borderless to match grouped value+toggle rows */
 tbody tr:last-child td {
   border-bottom: none !important;
 }
