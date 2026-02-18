@@ -92,6 +92,30 @@ function parseDurationString(s: string): number | undefined {
   return undefined;
 }
 
+function toMetersFromUnit(value: number, unitRaw: unknown): number {
+  const unit = typeof unitRaw === "string" ? unitRaw.trim().toLowerCase() : "";
+  if (!unit) return value;
+  if (
+    unit === "m" ||
+    unit === "meter" ||
+    unit === "meters" ||
+    unit === "metre" ||
+    unit === "metres"
+  ) {
+    return value;
+  }
+  if (unit === "km" || unit === "kilometer" || unit === "kilometers") {
+    return value * 1000;
+  }
+  if (unit === "mi" || unit === "mile" || unit === "miles" || unit === "mls") {
+    return value * 1609.344;
+  }
+  if (unit === "ft" || unit === "foot" || unit === "feet") {
+    return value * 0.3048;
+  }
+  return value;
+}
+
 function formatDuration(sec?: number): string {
   if (!sec || sec <= 0) return "—";
   const h = Math.floor(sec / 3600);
@@ -767,6 +791,7 @@ function extractWorkoutsFromOutdoorJSON(obj: unknown): Workout[] {
     };
   });
 }
+void extractWorkoutsFromOutdoorJSON;
 
 function extractWorkoutFromSinglePageJSON(
   obj: unknown,
@@ -783,12 +808,15 @@ function extractWorkoutFromSinglePageJSON(
   const summaryData = Array.isArray(core.data) ? core.data : [];
 
   const descriptorByIndex = new Map<number, string>();
+  const descriptorUnitByIndex = new Map<number, string>();
   for (const d of descriptors) {
     const rec = asRecord(d);
     const i = safeNumber(rec?.i);
     const pr = asRecord(rec?.pr);
     const name = typeof pr?.name === "string" ? pr.name : undefined;
+    const unit = typeof pr?.um === "string" ? pr.um : undefined;
     if (i != null && name) descriptorByIndex.set(i, name);
+    if (i != null && unit) descriptorUnitByIndex.set(i, unit);
   }
 
   const hrByT = new Map<number, number>();
@@ -821,6 +849,7 @@ function extractWorkoutFromSinglePageJSON(
   };
 
   const series: SeriesPoint[] = [];
+  let sampleDistanceM: number | undefined;
   for (const s of samples) {
     const rec = asRecord(s);
     const t = safeNumber(rec?.t);
@@ -832,9 +861,17 @@ function extractWorkoutFromSinglePageJSON(
       const key = descriptorByIndex.get(idx)?.toLowerCase();
       const value = vs[idx];
       if (!key) continue;
-      if (key === "power") point.watts = value;
-      if (key === "spm") point.cadence = value;
-      if (key === "floors" || key === "elevation") point.verticalM = value;
+      if (key === "power" || key === "runningpower") point.watts = value;
+      if (key === "spm" || key === "rpm" || key === "cadence" || key === "runningcadence") {
+        point.cadence = value;
+      }
+      if (key === "floors" || key === "elevation") {
+        point.verticalM = toMetersFromUnit(value, descriptorUnitByIndex.get(idx));
+      }
+      if (key === "hdistance" || key === "distance") {
+        const distM = toMetersFromUnit(value, descriptorUnitByIndex.get(idx));
+        sampleDistanceM = sampleDistanceM == null ? distM : Math.max(sampleDistanceM, distM);
+      }
     }
     const hr = hrAt(point.tSec);
     if (hr != null) point.hr = Math.round(hr);
@@ -845,17 +882,39 @@ function extractWorkoutFromSinglePageJSON(
 
   let durationSec = series.length ? series[series.length - 1].tSec : undefined;
   let move: number | undefined;
+  let summaryDistanceM: number | undefined;
+  let summaryVerticalM: number | undefined;
+  let calories: number | undefined;
   for (const item of summaryData) {
     const rec = asRecord(item);
     const property = typeof rec?.property === "string" ? rec.property.toLowerCase() : "";
     const name = typeof rec?.name === "string" ? rec.name.toLowerCase() : "";
+    const unit = typeof rec?.uM === "string" ? rec.uM : "";
+    const rawValue = safeNumber(rec?.rawValue);
     if (property.includes("duration") || name.includes("duration")) {
-      const fromRawMin = safeNumber(rec?.rawValue);
+      const fromRawMin = rawValue;
       const fromText = typeof rec?.value === "string" ? parseDurationString(rec.value) : undefined;
       durationSec = fromText ?? (fromRawMin != null ? Math.round(fromRawMin * 60) : durationSec);
     }
     if (property.includes("move") || name.includes("move")) {
-      move = safeNumber(rec?.rawValue);
+      move = rawValue;
+    }
+    if (
+      property.includes("distance") ||
+      property.includes("hdistance") ||
+      name.includes("distance")
+    ) {
+      if (rawValue != null) {
+        summaryDistanceM = toMetersFromUnit(rawValue, unit);
+      }
+    }
+    if (property.includes("elevation") || property.includes("floors") || name.includes("elevation")) {
+      if (rawValue != null) {
+        summaryVerticalM = toMetersFromUnit(rawValue, unit);
+      }
+    }
+    if (property.includes("calories") || name.includes("calories")) {
+      calories = rawValue;
     }
   }
 
@@ -883,6 +942,9 @@ function extractWorkoutFromSinglePageJSON(
   if (verticalValues.length) {
     metrics["Floors"] = Math.max(...verticalValues);
   }
+  const distanceM = sampleDistanceM ?? summaryDistanceM;
+  if (distanceM != null) metrics["HDistance"] = distanceM;
+  if (summaryVerticalM != null && metrics["Floors"] == null) metrics["Floors"] = summaryVerticalM;
 
   const dateStr = typeof core.date === "string" ? core.date : undefined;
   const parsedDate = dateStr ? new Date(dateStr) : undefined;
@@ -921,8 +983,9 @@ function extractWorkoutFromSinglePageJSON(
         ? core.physicalActivityId
         : `json-${Date.now()}`;
 
-  const verticalM = verticalValues.length ? Math.max(...verticalValues) : undefined;
+  const verticalM = verticalValues.length ? Math.max(...verticalValues) : summaryVerticalM;
   const cadenceSpm = average(cadenceValues);
+  const hasDistance = pickDistanceM(metrics) != null;
 
   return {
     uid: `json-${id}`,
@@ -932,7 +995,7 @@ function extractWorkoutFromSinglePageJSON(
     startedAtDisplay: startedAtISO ? formatDateHuman(startedAtISO) : "—",
     activityName,
     durationSec,
-    calories: undefined,
+    calories,
     distanceM: pickDistanceM(metrics),
     verticalM,
     cadenceSpm: cadenceSpm != null ? cadenceSpm : undefined,
@@ -945,20 +1008,18 @@ function extractWorkoutFromSinglePageJSON(
       includeCadenceSeries: cadenceValues.length > 0,
       includePowerSeries: powerValues.length > 0,
       includeMetricsInNotes: false,
-      includeCalories: false,
-      includeDistance: pickDistanceM(metrics) != null,
+      includeCalories: calories != null,
+      includeDistance: hasDistance,
       includeVerticalAsAltitude: verticalM != null,
     },
   };
 }
 
 function computeSummary(ws: Workout[]) {
-  const indoor = ws.filter((w) => w.source === "indoor").length;
-  const outdoor = ws.filter((w) => w.source === "outdoor").length;
   const totalSec = ws.reduce((acc, w) => acc + (w.durationSec ?? 0), 0);
   const totalDistM = ws.reduce((acc, w) => acc + (w.distanceM ?? 0), 0);
   const totalVertM = ws.reduce((acc, w) => acc + (w.verticalM ?? 0), 0);
-  return { indoor, outdoor, totalSec, totalDistM, totalVertM };
+  return { totalSec, totalDistM, totalVertM };
 }
 
 export default function App() {
@@ -973,12 +1034,13 @@ export default function App() {
   const [zipName, setZipName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [didParse, setDidParse] = useState(false);
-  const [importMode, setImportMode] = useState<ImportMode>("zip");
+  const [importMode, setImportMode] = useState<ImportMode>("json");
   const [lastImportMode, setLastImportMode] = useState<ImportMode | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("tcx");
   const [enhancedFitCompatibility, setEnhancedFitCompatibility] = useState(false);
   const [jsonInput, setJsonInput] = useState("");
   const [jsonStartTime, setJsonStartTime] = useState("12:00");
+  const [showJsonHelp, setShowJsonHelp] = useState(false);
 
   const sortedWorkouts = useMemo(() => {
     return [...workouts].sort((a, b) => {
@@ -1013,23 +1075,19 @@ export default function App() {
       setZipName(file.name);
 
       // Privacy-by-design:
-      // Only parse indooractivities* and outdooractivities*.
-      // Ignore masterdata* and biometrics* entirely.
+      // Parse only indooractivities* for machine workouts.
+      // Ignore all other files (including masterdata* and biometrics*).
       const fileEntries = Object.keys(zip.files);
 
       const targetNames = fileEntries.filter((n) => {
         const lower = n.toLowerCase();
         const basename = lower.split("/").pop() ?? lower;
-        return (
-          (basename.startsWith("indooractivities-") ||
-            basename.startsWith("outdooractivities-")) &&
-          basename.endsWith(".json")
-        );
+        return basename.startsWith("indooractivities-") && basename.endsWith(".json");
       });
 
       if (targetNames.length === 0) {
         setError(
-          "Could not find indooractivities-*.json or outdooractivities-*.json in this ZIP. Make sure it’s a full MyWellness export.",
+          "Could not find indooractivities-*.json in this ZIP. Make sure it’s a full MyWellness export.",
         );
         return;
       }
@@ -1049,8 +1107,6 @@ export default function App() {
 
         if (basename.startsWith("indooractivities-")) {
           all.push(...extractWorkoutsFromIndoorJSON(obj));
-        } else if (basename.startsWith("outdooractivities-")) {
-          all.push(...extractWorkoutsFromOutdoorJSON(obj));
         }
       }
 
@@ -1259,31 +1315,53 @@ export default function App() {
         >
 
           <div style={{ padding: "16px 16px" }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-              <button
-                type="button"
-                style={{
-                  ...downloadButtonStyle,
-                  background: importMode === "zip" ? "#3b82f6" : "#ffffff",
-                  color: importMode === "zip" ? "#ffffff" : "#0f172a",
-                  borderColor: "#94a3b8",
-                }}
-                onClick={() => setImportMode("zip")}
-              >
-                Upload ZIP
-              </button>
-              <button
-                type="button"
-                style={{
-                  ...downloadButtonStyle,
-                  background: importMode === "json" ? "#3b82f6" : "#ffffff",
-                  color: importMode === "json" ? "#ffffff" : "#0f172a",
-                  borderColor: "#94a3b8",
-                }}
-                onClick={() => setImportMode("json")}
-              >
-                Paste JSON
-              </button>
+            <div style={{ ...subtleText, marginBottom: 6, fontWeight: 600, opacity: 1 }}>
+              Select mode:
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                flexWrap: "wrap",
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  style={{
+                    ...downloadButtonStyle,
+                    background: importMode === "json" ? "#3b82f6" : "#e2e8f0",
+                    color: importMode === "json" ? "#ffffff" : "#64748b",
+                    borderColor: importMode === "json" ? "#3b82f6" : "#cbd5e1",
+                    opacity: importMode === "json" ? 1 : 0.75,
+                    filter: importMode === "json" ? "none" : "saturate(0.7)",
+                    fontWeight: importMode === "json" ? 700 : 600,
+                  }}
+                  onClick={() => setImportMode("json")}
+                >
+                  Paste JSON
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...downloadButtonStyle,
+                    background: importMode === "zip" ? "#3b82f6" : "#e2e8f0",
+                    color: importMode === "zip" ? "#ffffff" : "#64748b",
+                    borderColor: importMode === "zip" ? "#3b82f6" : "#cbd5e1",
+                    opacity: importMode === "zip" ? 1 : 0.75,
+                    filter: importMode === "zip" ? "none" : "saturate(0.7)",
+                    fontWeight: importMode === "zip" ? 700 : 600,
+                  }}
+                  onClick={() => setImportMode("zip")}
+                >
+                  Upload ZIP
+                </button>
+              </div>
+              <div style={{ ...subtleText }}>
+                Best use: JSON for one detailed workout; ZIP for bulk exports.
+              </div>
             </div>
 
             {importMode === "zip" ? (
@@ -1318,17 +1396,62 @@ export default function App() {
                 {!zipName && !isLoading && !error && (
                   <div style={{ marginTop: 14, ...subtleText }}>
                     Reads only{" "}
-                    <code style={{ backgroundColor: "#dbe2ee" }}>indooractivities-*.json</code> and{" "}
-                    <code style={{ backgroundColor: "#dbe2ee" }}>outdooractivities-*.json</code>.
+                    <code style={{ backgroundColor: "#dbe2ee" }}>indooractivities-*.json</code>.
                   </div>
                 )}
               </div>
             ) : (
               <div>
-                <div style={{ fontWeight: 700, fontSize: 16 }}>Paste Single Workout JSON</div>
+                <div style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>Paste Single Workout JSON</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowJsonHelp((v) => !v)}
+                    aria-expanded={showJsonHelp}
+                    aria-controls="json-help-panel"
+                    title="How to get JSON from browser"
+                    style={{
+                      border: "1px solid #94a3b8",
+                      background: "#ffffff",
+                      color: "#0f172a",
+                      borderRadius: 999,
+                      width: 22,
+                      height: 22,
+                      lineHeight: "20px",
+                      padding: 0,
+                      textAlign: "center",
+                      cursor: "pointer",
+                      fontWeight: 700,
+                      fontSize: 12,
+                    }}
+                  >
+                    ?
+                  </button>
+                </div>
                 <div style={{ marginTop: 8, ...subtleText }}>
                   Paste the JSON payload copied from a MyWellness Training Workout page, then parse it.
                 </div>
+                {showJsonHelp && (
+                  <div
+                    id="json-help-panel"
+                    style={{
+                      marginTop: 10,
+                      padding: 12,
+                      border: "1px solid #94a3b8",
+                      borderRadius: 10,
+                      background: "#ffffff",
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, marginBottom: 6 }}>How to get the workout JSON</div>
+                    <ol style={{ margin: "0 0 0 18px", padding: 0, ...subtleText }}>
+                      <li>Open your workout detail page in MyWellness on desktop.</li>
+                      <li>Press F12 to open Developer Tools.</li>
+                      <li>Go to the Network tab and reload the page.</li>
+                      <li>Filter for XHR/Fetch and click the workout details request.</li>
+                      <li>Open the Response tab, copy the full JSON, and paste it here.</li>
+                    </ol>
+                  </div>
+                )}
                 <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <label htmlFor="json-start-time" style={{ ...subtleText, fontWeight: 600, opacity: 1 }}>
                     Workout start time:
@@ -1367,7 +1490,22 @@ export default function App() {
                 />
                 <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
                   <button type="button" style={downloadButtonStyle} onClick={onParsePastedJson}>
-                    Parse JSON
+                    Process Workout
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowJsonHelp(true)}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: "#1d4ed8",
+                      cursor: "pointer",
+                      textDecoration: "underline",
+                      padding: 0,
+                      fontSize: 13,
+                    }}
+                  >
+                    How to get this JSON?
                   </button>
                   <span style={subtleText}>Supports one workout per paste.</span>
                 </div>
@@ -1407,8 +1545,7 @@ export default function App() {
                 <div>
                   <div style={{ fontWeight: 700, marginBottom: 6 }}>Detected workouts</div>
                   <div style={subtleText}>
-                    Indoor: <b>{summary.indoor}</b> • Outdoor: <b>{summary.outdoor}</b> • Total:{" "}
-                    <b>{sortedWorkouts.length}</b>
+                    Total: <b>{sortedWorkouts.length}</b>
                   </div>
                 </div>
                 <div style={subtleText}>
@@ -1495,7 +1632,7 @@ export default function App() {
                       Duration
                     </th>
                     <th style={thStyle}>
-                      Source
+                      Type
                     </th>
                     <th style={thStyle}>Distance</th>
                     <th style={thStyle}>HR</th>
@@ -1521,7 +1658,7 @@ export default function App() {
                           {formatDuration(w.durationSec)}
                         </td>
                         <td style={tdValueRow}>
-                          {w.source}
+                          Machine
                         </td>
 
                         <td style={tdValueRowCenter}>
