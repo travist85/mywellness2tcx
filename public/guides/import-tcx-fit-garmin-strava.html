@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How to Import TCX/FIT into Garmin and Strava</title>
+  <meta name="description" content="How to import converted TCX or FIT workouts into Garmin Connect and Strava, plus common import fixes." />
+  <meta name="robots" content="index,follow" />
+  <link rel="canonical" href="https://mywellness2tcx.vercel.app/guides/import-tcx-fit-garmin-strava.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="How to Import TCX/FIT into Garmin and Strava" />
+  <meta property="og:description" content="Simple import steps for converted workout files." />
+  <meta property="og:url" content="https://mywellness2tcx.vercel.app/guides/import-tcx-fit-garmin-strava.html" />
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 880px; margin: 0 auto; padding: 24px; line-height: 1.55; color: #0f172a;">
+  <main>
+    <p><a href="/">Back to converter</a></p>
+    <h1>How to Import TCX/FIT into Garmin and Strava</h1>
+    <p>
+      After converting a Technogym/MyWellness workout, choose where you want to upload the file.
+      FIT usually has better compatibility, but TCX is still useful in many tools.
+    </p>
+    <p>
+      If one format fails, try the other before troubleshooting deeper.
+    </p>
+
+    <h2>Garmin Connect</h2>
+    <ol>
+      <li>Open Garmin Connect on the web.</li>
+      <li>Go to <b>Import Data</b> (or the upload option in Activities).</li>
+      <li>Select your <code>.fit</code> or <code>.tcx</code> file.</li>
+      <li>Upload and review the activity details.</li>
+    </ol>
+
+    <h2>Strava</h2>
+    <ol>
+      <li>Open Strava on the web.</li>
+      <li>Use <b>Upload Activity</b> then choose <b>File</b>.</li>
+      <li>Select your converted file and complete upload.</li>
+      <li>Edit title/sport type if needed.</li>
+    </ol>
+
+    <h2>Which format should you use?</h2>
+    <ul>
+      <li><b>FIT:</b> Best default for compatibility and richer activity fields.</li>
+      <li><b>TCX:</b> Good fallback for tools that specifically expect TCX XML.</li>
+    </ul>
+
+    <h2>Common import issues</h2>
+    <ul>
+      <li><b>Rejected file:</b> Re-export with FIT and retry.</li>
+      <li><b>No distance shown:</b> Ensure distance export toggle was enabled before download.</li>
+      <li><b>Duplicate activity:</b> Delete the earlier upload and keep one copy.</li>
+      <li><b>Wrong sport type:</b> Edit activity type in the destination app after upload.</li>
+    </ul>
+
+    <hr />
+    <p>
+      Need the source data first? <a href="/guides/export-mywellness-technogym.html">Export from MyWellness</a>
+    </p>
+  </main>
+</body>
+</html>

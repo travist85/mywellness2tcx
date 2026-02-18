@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Troubleshooting MyWellness JSON Import</title>
+  <meta name="description" content="Fix common issues when copying MyWellness workout JSON into a TCX/FIT converter." />
+  <meta name="robots" content="index,follow" />
+  <link rel="canonical" href="https://mywellness2tcx.vercel.app/guides/troubleshooting-mywellness-json.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="Troubleshooting MyWellness JSON Import" />
+  <meta property="og:description" content="Fix invalid JSON, missing fields, and parse errors quickly." />
+  <meta property="og:url" content="https://mywellness2tcx.vercel.app/guides/troubleshooting-mywellness-json.html" />
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Why does the converter say invalid JSON?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "The pasted data is not a complete JSON object. Copy the full response body from the browser network response and paste it exactly as-is."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Why is distance or power missing after import?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Some workouts do not include all metrics. Try a different workout payload or ZIP export. For machine sessions, use indooractivities JSON when possible."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How do I find the right MyWellness request in browser dev tools?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Open Developer Tools, go to Network, reload the workout page, filter to XHR/Fetch, select the workout details request, and copy its full response JSON."
+          }
+        }
+      ]
+    }
+  </script>
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 880px; margin: 0 auto; padding: 24px; line-height: 1.55; color: #0f172a;">
+  <main>
+    <p><a href="/">Back to converter</a></p>
+    <h1>Troubleshooting MyWellness JSON Import</h1>
+    <p>
+      If JSON paste mode fails, use the checks below to quickly identify the problem.
+      This guide assumes no prior developer experience.
+    </p>
+
+    <h2>1) "Invalid JSON" error</h2>
+    <p>Most common causes:</p>
+    <ul>
+      <li>You copied only part of the response.</li>
+      <li>You copied preview text instead of raw response JSON.</li>
+      <li>You included extra characters before or after the JSON block.</li>
+    </ul>
+    <p>Fix: copy the complete response body and paste again.</p>
+
+    <h2>2) Workout parses but values look wrong</h2>
+    <ul>
+      <li>Check that the payload belongs to the exact workout page you opened.</li>
+      <li>Try a second workout to compare data completeness.</li>
+      <li>Use ZIP mode if you only need total values and not single-workout debugging.</li>
+    </ul>
+
+    <h2>3) How to capture JSON from browser tools</h2>
+    <ol>
+      <li>Open your workout page in MyWellness on desktop.</li>
+      <li>Open Developer Tools:
+        <b>F12</b> on Windows, or <b>Option + Command + I</b> on Mac.
+      </li>
+      <li>Open <b>Network</b> and reload the page.</li>
+      <li>Select <b>XHR/Fetch</b> requests and click the workout details call.</li>
+      <li>Open the <b>Response</b> tab and copy the full JSON object.</li>
+      <li>Paste into the converter and click <b>Process Workout</b>.</li>
+    </ol>
+
+    <h2>FAQ</h2>
+    <h3>Why does the converter say invalid JSON?</h3>
+    <p>The pasted data is not a complete JSON object. Copy the full response body from Network → Response and retry.</p>
+
+    <h3>Why is distance or power missing after import?</h3>
+    <p>Some workouts simply do not include all metrics. Try another workout payload or use ZIP mode for totals.</p>
+
+    <h3>How do I find the right request?</h3>
+    <p>Look for the request that returns a workout object with fields like <code>data</code>, <code>analitics</code>, and descriptor/sample arrays.</p>
+
+    <hr />
+    <p>
+      Need full export steps? <a href="/guides/export-mywellness-technogym.html">Read export guide</a>
+    </p>
+  </main>
+</body>
+</html>

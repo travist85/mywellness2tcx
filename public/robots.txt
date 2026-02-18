@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mywellness2tcx.vercel.app/sitemap.xml

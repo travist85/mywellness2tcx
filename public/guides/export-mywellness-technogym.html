@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How to Export Workouts from Technogym MyWellness</title>
+  <meta name="description" content="Step-by-step guide to export your Technogym MyWellness workouts and prepare files for TCX/FIT conversion." />
+  <meta name="robots" content="index,follow" />
+  <link rel="canonical" href="https://mywellness2tcx.vercel.app/guides/export-mywellness-technogym.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="How to Export Workouts from Technogym MyWellness" />
+  <meta property="og:description" content="Simple export steps for Technogym machine workouts in MyWellness." />
+  <meta property="og:url" content="https://mywellness2tcx.vercel.app/guides/export-mywellness-technogym.html" />
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 880px; margin: 0 auto; padding: 24px; line-height: 1.55; color: #0f172a;">
+  <main>
+    <p><a href="/">Back to converter</a></p>
+    <h1>How to Export Workouts from Technogym MyWellness</h1>
+    <p>
+      This guide explains how to get your workout data out of MyWellness so you can convert it to TCX or FIT.
+      It is written for users with no technical background.
+    </p>
+    <p>
+      Outcome: you will have a ZIP export that can be uploaded directly into the converter.
+    </p>
+
+    <h2>What you can export</h2>
+    <p>
+      In MyWellness, machine sessions are typically stored in files named <code>indooractivities-*.json</code> inside your export ZIP.
+      The converter reads these files directly.
+    </p>
+
+    <h2>Export steps</h2>
+    <ol>
+      <li>Sign in to your MyWellness account on desktop.</li>
+      <li>Open account settings and look for data/privacy export options.</li>
+      <li>Request and download your archive when it is ready.</li>
+      <li>Save the ZIP file without changing its contents.</li>
+      <li>Open the converter and use <b>Upload ZIP</b>.</li>
+    </ol>
+
+    <h2>Quick checks before upload</h2>
+    <ul>
+      <li>Do not extract and re-zip unless necessary.</li>
+      <li>Make sure the ZIP contains at least one file named <code>indooractivities-*.json</code>.</li>
+      <li>If your export is old, request a fresh one and retry.</li>
+    </ul>
+
+    <h2>If ZIP export is missing or incomplete</h2>
+    <p>
+      Use the converter's <b>Paste JSON</b> mode for a single workout. You can copy a workout response from your browser dev tools.
+      If needed, follow this troubleshooting guide:
+      <a href="/guides/troubleshooting-mywellness-json.html">Fix JSON import issues</a>.
+    </p>
+
+    <hr />
+    <p>
+      Next: <a href="/guides/import-tcx-fit-garmin-strava.html">Import converted files into Garmin/Strava</a>
+    </p>
+  </main>
+</body>
+</html>
